@@ -1,0 +1,3 @@
+<launch>
+    <node pkg="edgepoints" type="edgepoints" name="edgepoints" output="screen"/>
+</launch>
