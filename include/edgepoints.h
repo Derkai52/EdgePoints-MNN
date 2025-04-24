@@ -10,8 +10,8 @@
 #include <vector>
 #include <memory>
 #include <type_traits>
-// #include "InterpolateSparse2D.h"
-
+#include "InterpolateSparse2D.h"
+#include "utils.h"
 
 using namespace nvinfer1;
 
@@ -60,15 +60,8 @@ class EdgePoints
     EdgePoints();
 
 
-    /**
-    * @brief Constructor of the EdgePoints class.
-    * @param config_path Path to the config file.
-    * @param engine_path Path to the weights folder containing the .engine file.
-   */
     // 初始化参数
-    void initialize(const std::string engine_path);
-
-
+    // void initialize(const std::string engine_path);
     /**
     * @brief Function to perform sparse keypoint detection by inferencing on the TensorRT engine. It preprocesses the data, performs inference, postprocesses the outputs and returns them.
     * @param img The input image to perform inference on.
@@ -76,7 +69,7 @@ class EdgePoints
     * @param descriptors Descriptors of the keypoints.
     * @param scores Confidence scores of the keypoints.
    */
-    void detectAndCompute(const cv::Mat& img, torch::Tensor& keypoints, torch::Tensor& descriptors, torch::Tensor& scores);
+    void detectAndCompute(const cv::Mat& img, torch::Tensor& keypoints, torch::Tensor& descriptors);
 
     /**
     * @brief Function to perform dense keypoint detection by inferencing on the TensorRT engine. It preprocesses the data, performs inference, postprocesses the outputs and returns them.
@@ -145,7 +138,6 @@ class EdgePoints
    */
     void create_xy(int h, int w, torch::Tensor& xy);
 
-
     //TensorRT Engine variables
     std::unique_ptr<IRuntime, DestroyObjects> runtime;
     std::unique_ptr<ICudaEngine, DestroyObjects> engine;
@@ -158,7 +150,8 @@ class EdgePoints
     int batchSize, inputC, inputH, inputW;
 
     //Binding index for all the data
-    int inputIndex, featsIndex, keypointsIndex, heatmapIndex;
+    int inputIndex, scoresIndex, descIndex;
+    // int inputIndex, scoresIndex, keypointsIndex, heatmapIndex;
     
     // Select top - k features
     int top_k;
@@ -171,14 +164,15 @@ class EdgePoints
     cv::Mat preprocessedImage;
 
     //Tensor to store output data
-    torch::Tensor featsData, keypointsData, heatmapData;
+    torch::Tensor descData, scoresData;
+    // torch::Tensor featsData, keypointsData, heatmapData, descmapData, scoresData;
 
     //Torch device (Must be CUDA)
     torch::Device dev;
 
     //Class objects to interpolate the Tensors
-    // InterpolateSparse2D _nearest;
-	// InterpolateSparse2D bilinear;
+    InterpolateSparse2D _nearest;
+	InterpolateSparse2D bilinear;
 
     //Non-Max Suppression params
     float threshold;

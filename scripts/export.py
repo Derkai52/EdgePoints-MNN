@@ -44,8 +44,8 @@ def build_tensorrt_engine(weights: str,
         fp16_mode: bool = True,
         use_dynamic_axis: bool = True,
         onnx_opset: int = 17,
-        workspace: int = 4096,
-        useDLACore: int = 0,
+        # workspace: int = 4096,
+        # useDLACore: int = 0,
         allowGPUFallback: bool = True) -> None: 
 
     if weights.endswith(".pt"):
@@ -68,8 +68,8 @@ def build_tensorrt_engine(weights: str,
     args = ["/usr/src/tensorrt/bin/trtexec"]
     args.append(f"--onnx={onnx_weight}")
     args.append(f"--saveEngine={engine_weight}")
-    args.append(f"--workspace={workspace}")
-    args.append(f"--useDLACore={useDLACore}")
+    # args.append(f"--workspace={workspace}")
+    # args.append(f"--useDLACore={useDLACore}")
     args.append(f"--allowGPUFallback={allowGPUFallback}")
 
     if fp16_mode:
@@ -87,8 +87,8 @@ def main():
     parser.add_argument("--fp16_mode", type=bool, default=True)
     parser.add_argument("--use_dynamic_axis", type=bool, default=True)
     parser.add_argument("--onnx_opset", type=int, default=17)
-    parser.add_argument("--workspace", type=int, default=4096)
-    parser.add_argument("--useDLACore", type=int, default=0)
+    # parser.add_argument("--workspace", type=int, default=4096)
+    # parser.add_argument("--useDLACore", type=int, default=0)
     parser.add_argument("--allowGPUFallback", type=bool, default=True)
 
     args = parser.parse_args()
@@ -97,10 +97,10 @@ def main():
     fp16_mode = args.fp16_mode
     onnx_opset = args.onnx_opset
     use_dynamic_axis = args.use_dynamic_axis
-    workspace = args.workspace
-    useDLACore = args.useDLACore
+    # workspace = args.workspace
+    # useDLACore = args.useDLACore
     allowGPUFallback = args.allowGPUFallback
-    build_tensorrt_engine(weights, imgsz, fp16_mode, use_dynamic_axis, onnx_opset, workspace, useDLACore, allowGPUFallback)
+    build_tensorrt_engine(weights, imgsz, fp16_mode, use_dynamic_axis, onnx_opset, allowGPUFallback)
 
 if __name__ == '__main__':
     main()

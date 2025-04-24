@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
+set(CMAKE_CUDA_ARCHITECTURES 87)
 project(edgepoints)
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
@@ -11,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
 )
 
+find_package(yaml-cpp REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(CUDA REQUIRED)
 find_package(Torch REQUIRED PATHS /home/emnavi/.local/lib/python3.8/site-packages/torch/share/cmake/Torch)
@@ -41,9 +43,11 @@ include_directories(
 add_library(edgepoints_lib SHARED
     src/edgepoints.cpp
     include/edgepoints.h 
+    include/InterpolateSparse2D.h
+    include/utils.h
 )
 link_directories(${CUDA_LIBRARY_DIRS} ${TENSORRT_LIBRARY_DIR})
-target_link_libraries(edgepoints_lib ${catkin_LIBRARIES} ${CUDA_LIBRARIES} ${OpenCV_LIBS} ${TORCH_LIBRARIES} nvinfer nvonnxparser nvinfer_plugin)
+target_link_libraries(edgepoints_lib ${catkin_LIBRARIES} ${CUDA_LIBRARIES} ${OpenCV_LIBS} ${TORCH_LIBRARIES} nvinfer nvonnxparser nvinfer_plugin yaml-cpp)
 
 add_executable(demo src/demo.cpp)
-target_link_libraries(demo ${catkin_LIBRARIES} edgepoints_lib )
+target_link_libraries(demo ${catkin_LIBRARIES} edgepoints_lib)

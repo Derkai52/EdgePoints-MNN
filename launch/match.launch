@@ -1,3 +1,8 @@
 <launch>
-    <node pkg="edgepoints" type="edgepoints" name="edgepoints" output="screen"/>
+    <node pkg="edgepoints" type="demo" name="edgepoints" output="screen"/>
+
+	<include file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
+        <arg name="port" value="8765"/>
+    </include>
+
 </launch>

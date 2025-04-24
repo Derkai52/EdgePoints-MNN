@@ -2,9 +2,19 @@ import torch
 from torch import nn
 from typing import Optional, Callable
 import torch.nn.functional as F
-from torchvision.models import resnet
 import math
 from typing import List
+
+
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
+    return nn.Conv2d(
+        in_planes, out_planes, kernel_size=3, stride=stride,
+        padding=dilation, groups=groups, bias=False, dilation=dilation
+    )
+
+def conv1x1(in_planes, out_planes, stride=1):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels,
@@ -17,9 +27,9 @@ class ConvBlock(nn.Module):
             self.gate = gate
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
-        self.conv1 = resnet.conv3x3(in_channels, out_channels)
+        self.conv1 = conv3x3(in_channels, out_channels)
         self.bn1 = norm_layer(out_channels)
-        self.conv2 = resnet.conv3x3(out_channels, out_channels)
+        self.conv2 = conv3x3(out_channels, out_channels)
         self.bn2 = norm_layer(out_channels)
 
     def forward(self, x):
@@ -55,9 +65,9 @@ class ResBlock(nn.Module):
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in ResBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = resnet.conv3x3(inplanes, planes, stride)
+        self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.conv2 = resnet.conv3x3(planes, planes)
+        self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
@@ -120,10 +130,10 @@ class EdgePoint(nn.Module):
                                norm_layer=nn.BatchNorm2d)
 
         # ================================== feature aggregation
-        self.conv1 = resnet.conv1x1(c1, dim // 4)
-        self.conv2 = resnet.conv1x1(c2, dim // 4)
-        self.conv3 = resnet.conv1x1(c3, dim // 4)
-        self.conv4 = resnet.conv1x1(dim, dim // 4)
+        self.conv1 = conv1x1(c1, dim // 4)
+        self.conv2 = conv1x1(c2, dim // 4)
+        self.conv3 = conv1x1(c3, dim // 4)
+        self.conv4 = conv1x1(dim, dim // 4)
         self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)
         self.upsample8 = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)
@@ -132,8 +142,8 @@ class EdgePoint(nn.Module):
         # ================================== detector and descriptor head
         self.single_head = single_head
         if not self.single_head:
-            self.convhead1 = resnet.conv1x1(dim, dim)
-        self.convhead2 = resnet.conv1x1(dim, dim)
+            self.convhead1 = conv1x1(dim, dim)
+        self.convhead2 = conv1x1(dim, dim)
 
         self.conv_score = nn.Conv2d(dim // 4, 1, 1)
         self.conv_transpose_4 = nn.ConvTranspose2d(dim // 4, dim // 4, 4, stride=4, padding=0)
@@ -171,6 +181,10 @@ class EdgePoint(nn.Module):
             x1234 = self.gate(self.convhead1(x1234))
         descriptor_map = self.convhead2(x1234)  # B x dim+1 x H x W
         scores_map = self.conv_score(x1)
+        # print("descriptor_map shape: ", descriptor_map.shape)
+        # print("scores_map shape: ", scores_map.shape)
+        # print(scores_map)
+        # print("scores_map shape: ", scores_map.shape)
 
         return scores_map, descriptor_map
 
@@ -183,6 +197,7 @@ class EdgePoint(nn.Module):
         b, c, h, w = image.shape
         h_ = math.ceil(h / 32) * 32 if h % 32 != 0 else h
         w_ = math.ceil(w / 32) * 32 if w % 32 != 0 else w
+        # print(b, c , h, w)
         if h_ != h:
             h_padding = torch.zeros(b, c, h_ - h, w, device=device)
             image = torch.cat([image, h_padding], dim=2)
@@ -223,7 +238,7 @@ class EdgePoint(nn.Module):
 	
     @staticmethod
     def get_edgepoints_output_names() -> List[str]:
-        return ["scores", "keypoints"]
+        return ["descriptor", "scores"]
 
 if __name__ == '__main__':
     from thop import profile
@@ -232,7 +247,7 @@ if __name__ == '__main__':
     net = EdgePoint(param)
     weight = torch.load('../model/EdgePoint.pt')
     net.load_state_dict(weight)
-    image = torch.randn(1, 3, 512, 512)
+    image = torch.randn(1, 3, 480, 640)
     flops, params = profile(net, inputs=(image,))
     print('{:<30}  {:<8} GFLops'.format('Computational complexity: ', flops / 1e9))
     print('{:<30}  {:<8} KB'.format('Number of parameters: ', params / 1e3))

@@ -5,31 +5,57 @@
 #include <algorithm>
 #include <opencv2/opencv.hpp>
 #include "edgepoints.h"
+#include <yaml-cpp/yaml.h>
+
 // #include "../estimator/parameters.h"
-#define IMAGE_HEIGHT 1280
-#define IMAGE_WIDTH 720
-#define MAX_KEYPOINTS 150
-#define THRESHOLD 0.5
-#define KERNEL_SIZE 21
-#define SOFTMAXTEMP 1
 
 using namespace nvinfer1;
 
-EdgePoints::EdgePoints():dev(torch::kCUDA){}
 
-void EdgePoints::initialize(const std::string engine_path){
-    // EdgePoints params
-    std::string engineFilePath = engine_path;
-    inputH = IMAGE_HEIGHT;
-    inputW = IMAGE_WIDTH;
-    top_k = MAX_KEYPOINTS;
+torch::Tensor simple_nms(const torch::Tensor& scores, int nms_radius) {
+    TORCH_CHECK(nms_radius >= 0, "NMS radius must be non-negative.");
+
+    auto max_pool = [&](const torch::Tensor& x) {
+        return torch::nn::functional::max_pool2d(
+            x,
+            torch::nn::functional::MaxPool2dFuncOptions(nms_radius * 2 + 1)
+                .stride(1)
+                .padding(nms_radius)
+        );
+    };
+
+    auto zeros = torch::zeros_like(scores);
+    auto max_mask = scores == max_pool(scores);
+
+    for (int i = 0; i < 2; ++i) {
+        auto supp_mask = max_pool(max_mask.to(torch::kFloat)) > 0;
+        auto supp_scores = torch::where(supp_mask, zeros, scores);
+        auto new_max_mask = supp_scores == max_pool(supp_scores);
+        max_mask = max_mask | (new_max_mask & (~supp_mask));
+    }
+
+    return torch::where(max_mask, scores, zeros);
+}
+
+
+EdgePoints::EdgePoints():dev(torch::kCUDA)
+{
+    std::string config_path = "/home/emnavi/ws_edgepoints/src/EdgePoints-MNN/launch/config.yaml";
+    std::string engineFilePath = "/home/emnavi/ws_edgepoints/src/EdgePoints-MNN/model/EdgePoint.engine";
+    // std::string engineFilePath = "/home/emnavi/ws_edgepoints/src/EdgePoints-MNN/model/xfeat.engine";
+    YAML::Node config = YAML::LoadFile(config_path);
+
+    // XFeat params
+    inputH = config["image_height"].as<int>();
+    inputW = config["image_width"].as<int>();
+    top_k = config["max_keypoints"].as<int>();
 
     // NMS params
-    threshold = THRESHOLD;
-    kernel_size = KERNEL_SIZE;
+    threshold = config["threshold"].as<float>();
+    kernel_size = config["kernel_size"].as<int>();
 
     //Softmax params
-    softmaxTemp = SOFTMAXTEMP;
+    softmaxTemp = config["softmaxTemp"].as<float>();
 
     // Load and initialize the engine
     loadEngine(engineFilePath);
@@ -50,19 +76,19 @@ void EdgePoints::initialize(const std::string engine_path){
     rh = static_cast<float>(inputH) / static_cast<float>(_H);
     rw = static_cast<float>(inputW) / static_cast<float>(_W);
 
-    // TODO(Derkai): TensorRT >= 8.6 ，弃用了getBindingIndex
     //Get engine bindings
     inputIndex = engine->getBindingIndex("image");
-    featsIndex = engine->getBindingIndex("feats");
-    keypointsIndex = engine->getBindingIndex("keypoints");
-    heatmapIndex = engine->getBindingIndex("heatmap");
+    descIndex = engine->getBindingIndex("descriptor");
+    scoresIndex = engine->getBindingIndex("scores");
+    // heatmapIndex = engine->getBindingIndex("heatmap");
 
     //Sparse interpolator for post-processing outputs
     _nearest = InterpolateSparse2D("nearest");
 	bilinear = InterpolateSparse2D("bilinear");
+
 }
 
-void EdgePoints::detectAndCompute(const cv::Mat& img, torch::Tensor& keypoints, torch::Tensor& descriptors, torch::Tensor& scores)
+void EdgePoints::detectAndCompute(const cv::Mat& img, torch::Tensor& keypoints, torch::Tensor& descriptors)
 {
 
     // Preprocess input image and convert to Tensor on GPU
@@ -71,123 +97,185 @@ void EdgePoints::detectAndCompute(const cv::Mat& img, torch::Tensor& keypoints, 
     batchSize = input_Data.size(0);
 
     // Variables to store output from TensorRT engine
-    featsData = torch::empty({batchSize,64,outputH,outputW}, torch::device(dev).dtype(torch::kFloat32));
-    keypointsData = torch::empty({batchSize, 65, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
-    heatmapData = torch::empty({batchSize, 1, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
+    // featsData = torch::empty({batchSize,64,outputH,outputW}, torch::device(dev).dtype(torch::kFloat32));
+    // keypointsData = torch::empty({batchSize, 65, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
+    // heatmapData = torch::empty({batchSize, 1, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
+    descData = torch::empty({1, 64, 60, 80}, torch::device(dev).dtype(torch::kFloat32));
+    scoresData  = torch::empty({1, 1, 480, 640}, torch::device(dev).dtype(torch::kFloat32));
 
     // Create buffer to store input and outputs of TensorRT engine
-    void* buffers[4]; 
+    void* buffers[3]; 
     buffers[inputIndex] = input_Data.data_ptr();
-    buffers[featsIndex] = featsData.data_ptr();
-    buffers[keypointsIndex] = keypointsData.data_ptr();
-    buffers[heatmapIndex] = heatmapData.data_ptr();
+    buffers[scoresIndex] = descData.data_ptr();
+    buffers[descIndex] = scoresData.data_ptr();
+
+    // buffers[inputIndex] = input_Data.data_ptr();
+    // buffers[scoresIndex] = featsData.data_ptr();
+    // buffers[keypointsIndex] = keypointsData.data_ptr();
+    // buffers[heatmapIndex] = heatmapData.data_ptr();
 
     // Run inference on TensorRT engine
     context->executeV2(buffers);
 
-    featsData = torch::nn::functional::normalize(featsData, torch::nn::functional::NormalizeFuncOptions().dim(1));
-    keypointsData = get_kpts_heatmap(keypointsData,softmaxTemp);
-    auto mkpts = NMS(keypointsData,threshold, kernel_size);
+    descData = torch::nn::functional::normalize(descData,
+        torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
 
-    auto scores_ = (_nearest.forward(keypointsData, mkpts, _H, _W) * bilinear.forward(heatmapData, mkpts, _H, _W)).squeeze(-1);
+    /////////////////////////////////////// detect_keypoints ///////////////////////////
 
-    // Masking
-    auto mask_ = torch::all(mkpts == 0, -1);
-    scores_.masked_fill_(mask_,-1);
+    auto b = scoresData.size(0);
+    auto h = scoresData.size(2);
+    auto w = scoresData.size(3);
+    auto scores_nograd = scoresData.detach();
 
-    // Select top k features
-    auto idxs = std::get<1>(torch::sort(-scores_));
-    idxs = idxs.slice(-1,0, top_k);
-    auto mkpts_x = torch::gather(mkpts.select(-1,0),-1, idxs);
-    auto mkpts_y = torch::gather(mkpts.select(-1,1),-1, idxs);
-    mkpts = torch::cat(std::vector<torch::Tensor>{mkpts_x.unsqueeze(-1), mkpts_y.unsqueeze(-1)}, -1);
-    scores_ = torch::gather(scores_, -1, idxs);
+    auto nms_scores = simple_nms(scores_nograd, 2);
+    // std::cout << nms_scores << std::endl;
 
-    // Interpolate descriptors
-    auto feats = bilinear.forward(featsData, mkpts, _H, _W);
+    // remove border
+    int radius = 2;
+    nms_scores.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(0, radius + 1)}, 0);
+    nms_scores.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(0, radius + 1)}, 0);
+    nms_scores.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(h - radius, h)}, 0);
+    nms_scores.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(w - radius, w)}, 0);
 
-    // L2-Normalize
-    feats = torch::nn::functional::normalize(feats, torch::nn::functional::NormalizeFuncOptions().dim(-1));
 
-    // Correct keypoint scale
-    auto scale = torch::tensor({rw, rh}, torch::kFloat32).to(dev).view({1, 1, -1});
-    mkpts = mkpts * scale;
 
-    // Validity mask
-    auto valid = (scores_ > 0);
+    int top_k = 1000;
+    int n_limit=20000;
+    float scores_th = 0.2;
+    // Flatten for topk or mask-based selection
+    auto scores_flat = scores_nograd.view({b, -1});
+    auto nms_flat = nms_scores.view({b, -1});
+    std::vector<torch::Tensor> indices_keypoints;
 
-    // Use the valid mask to filter the keypoints, scores, and descriptors
-    auto keypoints_valid = mkpts.index({valid});
-    auto scores_valid = scores_.index({valid});
-    auto descriptors_valid = feats.index({valid});
 
-    // Synchronize all operations before moving the results back to the CPU
-    torch::cuda::synchronize();
 
-    // Transfer the valid points to the CPU
-    keypoints = keypoints_valid.cpu();
-    scores = scores_valid.cpu();
-    descriptors = descriptors_valid.cpu();
-}
+    if (top_k > 0) {
+        auto topk = std::get<1>(torch::topk(nms_scores.view({b, -1}), top_k, 1, true, true));
+        indices_keypoints = topk.unbind(0);
+    } else {
+        auto masks = nms_scores > scores_th;
+        auto scores_view = scores_nograd.view({b, -1});
+        for (int i = 0; i < b; ++i) {
+            auto mask = masks[i].view({-1});
+            auto indices = torch::nonzero(mask).squeeze();
+            if (indices.numel() > n_limit) {
+                auto kpt_scores = scores_view[i].index_select(0, indices);
+                auto sorted = std::get<1>(kpt_scores.sort(-1, /*descending=*/true));
+                indices = indices.index_select(0, sorted.slice(0, 0, n_limit));
+            }
+            indices_keypoints.push_back(indices);
+        }
+    }
 
-void EdgePoints::detectDense(const cv::Mat& img, torch::Tensor& keypoints, torch::Tensor& descriptors)
-{
-    // Preprocess input image and convert to Tensor on GPU
-    torch::Tensor input_Data = preprocessImages(img);
+    std::vector<torch::Tensor> keypoints_vec, scoredispersitys_vec, kptscores_vec;
 
-    batchSize = input_Data.size(0);
+    // sub
+    int kernel_size = 2 * radius + 1;
+    float temperature = 0.1f;
+    torch::Tensor x = torch::linspace(-radius, radius, kernel_size);
+    std::vector<torch::Tensor> mesh = torch::meshgrid({x, x}, /*indexing=*/"ij");
+    torch::Tensor mesh_y = mesh[0];  // shape: [kernel_size, kernel_size]
+    torch::Tensor mesh_x = mesh[1];  // shape: [kernel_size, kernel_size]
 
-    // Variables to store output from TensorRT engine
-    featsData = torch::empty({batchSize,64,outputH,outputW}, torch::device(dev).dtype(torch::kFloat32));
-    keypointsData = torch::empty({batchSize, 65, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
-    heatmapData = torch::empty({batchSize, 1, outputH, outputW}, torch::device(dev).dtype(torch::kFloat32));
+    // Step 3: stack and reshape (H, W) => [kernel_size*kernel_size, 2]
+    torch::Tensor hw_grid = torch::stack({mesh_y, mesh_x}, /*dim=*/-1)  // shape: [k, k, 2]
+                                    .reshape({-1, 2});                  // shape: [k*k, 2]
 
-    // Create buffer to store input and outputs of TensorRT engine
-    void* buffers[4]; 
-    buffers[inputIndex] = input_Data.data_ptr();
-    buffers[featsIndex] = featsData.data_ptr();
-    buffers[keypointsIndex] = keypointsData.data_ptr();
-    buffers[heatmapIndex] = heatmapData.data_ptr();
+    auto patches = torch::nn::functional::unfold(scoresData, torch::nn::functional::UnfoldFuncOptions({kernel_size, kernel_size}).padding(radius));
 
-    // Run inference on TensorRT engine
-    context->executeV2(buffers);
+    hw_grid = hw_grid.to(patches.device());
+    for (int i = 0; i < b; ++i) {
+        auto patch = patches[i].transpose(0, 1);  // (H*W) x kernel^2
+        auto indices_kpt = indices_keypoints[i];  // [M]
+        auto patch_scores = patch.index_select(0, indices_kpt);  // M x (kernel^2)
+        auto max_v = std::get<0>(patch_scores.max(1, true)).detach();  // M x 1
+        auto x_exp = (patch_scores - max_v) / temperature;
+        x_exp = x_exp.exp();  // M x (kernel^2)
 
-    featsData = featsData.permute({0, 2, 3, 1}).reshape({batchSize, -1, 64});
-    heatmapData = heatmapData.permute({0, 2, 3, 1}).reshape({batchSize, -1});
+        auto xy_residual = torch::matmul(x_exp, hw_grid) / x_exp.sum(1, true);  // M x 2
+        auto norm_dist2 = torch::norm((hw_grid.unsqueeze(0) - xy_residual.unsqueeze(1)) / radius, 2, -1).pow(2);
+        auto scoredispersity = (x_exp * norm_dist2).sum(1) / x_exp.sum(1);  // [M]
 
-    // Create a grid of (x, y) coordinates
-    torch::Tensor xy;
-    create_xy(outputH, outputW, xy);
-    xy = xy.mul(8).expand({batchSize, -1, -1});
+        auto xy_base = torch::stack({indices_kpt.remainder(w), indices_kpt.div(w)}, 1).to(torch::kFloat);
+        auto keypoints_xy = xy_base + xy_residual;
+        keypoints_xy = keypoints_xy / torch::tensor({(float)(w-1), (float)(h-1)}).to(keypoints_xy.device()) * 2 - 1;
 
-    auto [heatmap_topk, top_k_indices] = torch::topk(heatmapData, std::min(int(heatmapData.size(1)), top_k), -1);
+        auto kptscore = torch::nn::functional::grid_sample(
+            scoresData[i].unsqueeze(0),  // 1xCxHxW
+            keypoints_xy.view({1, 1, -1, 2}),
+            torch::nn::functional::GridSampleFuncOptions().mode(torch::kBilinear).align_corners(true)
+        )[0][0][0];  // CxN -> just first channel
 
-    auto feats = torch::gather(featsData, 1, top_k_indices.unsqueeze(-1).expand({-1, -1, 64}));
-    auto mkpts = torch::gather(xy, 1, top_k_indices.unsqueeze(-1).expand({-1, -1, 2}));
-    mkpts = mkpts * torch::tensor({rw, rh}, dev).view({1, -1});
+        keypoints_vec.push_back(keypoints_xy);
+        scoredispersitys_vec.push_back(scoredispersity);
+        kptscores_vec.push_back(kptscore);
+    }
+
+
+    keypoints = torch::cat(keypoints_vec);
+    torch::Tensor scoredispersitys = torch::cat(scoredispersitys_vec);
+    torch::Tensor kptscores = torch::cat(kptscores_vec);
+
+
+
+    ////////////   Sample_descriptor   /////////////////////////////////////////////////////////
+    std::vector<torch::Tensor> descriptors_v;
+    int64_t batch_size = descData.size(0);
+    int64_t channel = descData.size(1);
+    int64_t height = descData.size(2);
+    int64_t width = descData.size(3);
+
     
-    feats = feats.squeeze(0);
-    mkpts = mkpts.squeeze(0);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        torch::Tensor kpts = keypoints; // Nx2, normalized [-1, 1] (x, y)
 
-    // Synchronize operations before transferring results to the CPU
-    torch::cuda::synchronize();
+        // Reshape to 1x1xN x 2 (NCHW format with N points)
+        torch::Tensor grid = kpts.view({1, 1, -1, 2}); // 1x1xN x 2
 
-    // Return the results to the CPU
-    keypoints = mkpts.cpu();
-    descriptors = feats.cpu();
+        // Select one image feature map: 1xC x H x W
+        torch::Tensor fmap = descData[i].unsqueeze(0);  // 1 x C x H x W
+
+        // Sample descriptors using bilinear interpolation
+        torch::Tensor desc = torch::nn::functional::grid_sample(
+            fmap,
+            grid,
+            torch::nn::functional::GridSampleFuncOptions()
+                .mode(torch::kBilinear)
+                .padding_mode(torch::kZeros)
+                .align_corners(true)
+        );  // Output: 1 x C x 1 x N
+
+        // Remove extra dims -> C x N
+        desc = desc.squeeze(0).squeeze(1);  // C x N
+
+        // Normalize along channel dimension
+        desc = torch::nn::functional::normalize(desc, torch::nn::functional::NormalizeFuncOptions().p(2).dim(0));
+
+        // Transpose to N x C
+        descriptors_v.push_back(desc.t());  // N x C
+    }
+    descriptors = torch::cat(descriptors_v);
+
+
+    torch::Tensor scale = torch::tensor({float(img.cols - 1), float(img.rows - 1)}, keypoints.options());
+    keypoints = (keypoints + 1.0) / 2.0 * scale;  // Now in [0, W-1] x [0, H-1]
+
+    keypoints.cpu();
+    descriptors.cpu();
 }
+
 
 torch::Tensor EdgePoints::preprocessImages(const cv::Mat& img)
 {
     torch::Tensor img_tensor = MatToTensor(img);
 
-    img_tensor = torch::nn::functional::interpolate(
-        img_tensor,
-        torch::nn::functional::InterpolateFuncOptions()
-            .size(std::vector<int64_t>{_H, _W})
-            .mode(torch::kBilinear)
-            .align_corners(false)
-    );
+    // img_tensor = torch::nn::functional::interpolate(
+    //     img_tensor,
+    //     torch::nn::functional::InterpolateFuncOptions()
+    //         .size(std::vector<int64_t>{_H, _W})
+    //         .mode(torch::kBilinear)
+    //         .align_corners(false)
+    // );
 
 
     return img_tensor;
@@ -242,6 +330,7 @@ inline torch::Tensor EdgePoints::MatToTensor(const cv::Mat& img)
 
     torch::Tensor img_tensor = torch::from_blob(floatMat.data, {1, height, width, channels}, torch::kFloat32);
     img_tensor = img_tensor.permute({0, 3, 1, 2}).contiguous();
+    img_tensor = img_tensor.div(255.0);                          // 加上归一化
     img_tensor = img_tensor.to(dev);
 
     return img_tensor;
