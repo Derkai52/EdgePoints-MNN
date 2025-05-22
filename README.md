@@ -12,14 +12,14 @@
 ```bash
 mkdir -p ws_edgepoints/src
 cd ws_edgepoints/src
-git clone https://github.com/Derkai52/EdgePoints-MNN.git
+git clone https://github.com/Derkai52/EdgePoints-TensorRT.git
 
 catkin_make
 ```
 
 ### 导出模型
 ```bash
-/usr/src/tensorrt/bin/trtexec --onnx=/home/emnavi/ws_edgepoints/src/EdgePoints-MNN/model/EdgePoint.onnx --saveEngine=/home/emnavi/ws_edgepoints/src/EdgePoints-MNN/model/EdgePoint.engine
+/usr/src/tensorrt/bin/trtexec --onnx=/home/emnavi/ws_edgepoints/src/EdgePoints-TensorRT/model/EdgePoint.onnx --saveEngine=/home/emnavi/ws_edgepoints/src/EdgePoints-TensorRT/model/EdgePoint.engine
 ```
 
 
