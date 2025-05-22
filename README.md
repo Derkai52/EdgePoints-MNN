@@ -1,4 +1,4 @@
-## EdgePoints + MNN
+## EdgePoints TensorRT C++实现
 
 本示例为C++复现版本，并在 Nvidia Jetson Orin NX 16GB 平台部署
 
